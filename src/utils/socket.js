@@ -5,9 +5,9 @@ const env = require('../config/env');
 let io;
 
 function initSocket(httpServer) {
-  io = new Server(httpServer, {
-    cors: { origin: env.corsOrigin, credentials: true },
-  });
+io = new Server(httpServer, {
+  cors: { origin: true, credentials: true },
+});
 
   io.use((socket, next) => {
     try {
