@@ -6,7 +6,9 @@ const router = Router();
 router.use(authenticate);
 
 router.get('/alerts/summary', authorize('admin'), controller.alerts);
-router.patch('/:id/alerts/ack', authorize('admin'), controller.acknowledgeAlert); // before /:id/... is fine, these are more specific than /:id alone
+router.get('/matrix', controller.matrix); 
+router.patch('/:id/alerts/ack', authorize('admin'), controller.acknowledgeAlert);
+router.patch('/:id/alerts/date', authorize('admin'), controller.updateAlertDate); // ← new
 router.get('/', controller.list);
 router.get('/:id', controller.getOne);
 router.post('/', controller.create);

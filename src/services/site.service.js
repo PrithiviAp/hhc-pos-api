@@ -2,12 +2,96 @@ const Site = require('../models/Site');
 const Bill = require('../models/Bill');
 const ApiError = require('../utils/ApiError');
 const { getPagination, buildMeta } = require('../utils/pagination.util');
-
+const { computeLiveTotals } = require('./bill.service');
 /** Finds an existing site by (case-insensitive) address, or creates one.
  *  This is the single place site identity is decided, used both by the
  *  Site API itself and by bill.service when a bill only carries a free-text
  *  siteAddress. Since address is globally unique, this never depends on
  *  which customer is asking. */
+
+async function aggregateStatsForSites(siteIds) {
+  const bills = await Bill.find({ site: { $in: siteIds }, status: { $ne: 'CANCELLED' } });
+
+  const bySite = new Map();
+
+  for (const bill of bills) {
+    const siteKey = String(bill.site);
+    if (!bySite.has(siteKey)) {
+      bySite.set(siteKey, { totalBillAmount: 0, totalPendingAmount: 0, customersMap: new Map() });
+    }
+    const entry = bySite.get(siteKey);
+
+    let billAmount = bill.grandTotal;
+    let pendingAmount = bill.pendingAmount;
+    if (bill.returnDateUnknown) {
+      const { liveGrandTotal, livePendingAmount } = computeLiveTotals(bill);
+      billAmount = liveGrandTotal;
+      pendingAmount = livePendingAmount;
+    }
+
+    entry.totalBillAmount += billAmount;
+    entry.totalPendingAmount += pendingAmount;
+
+    const custKey = String(bill.customer);
+    let cust = entry.customersMap.get(custKey);
+    if (!cust) {
+      cust = {
+        customerId: bill.customer,
+        customerName: bill.customerName,
+        customerPhone: bill.customerPhone,
+        billAmount: 0,
+        pendingAmount: 0,
+        billCount: 0,
+      };
+      entry.customersMap.set(custKey, cust);
+    }
+    cust.billAmount += billAmount;
+    cust.pendingAmount += pendingAmount;
+    cust.billCount += 1;
+  }
+
+  const result = new Map();
+  for (const [siteKey, entry] of bySite) {
+    result.set(siteKey, {
+      totalBillAmount: entry.totalBillAmount,
+      totalPendingAmount: entry.totalPendingAmount,
+      customers: Array.from(entry.customersMap.values()).map((c) => ({
+        ...c,
+        billAmount: Math.round(c.billAmount * 100) / 100,
+        pendingAmount: Math.round(c.pendingAmount * 100) / 100,
+      })),
+    });
+  }
+  return result;
+}
+
+async function getSiteBills(siteId, query) {
+  const site = await Site.findById(siteId);
+  if (!site) throw ApiError.notFound('Site not found');
+
+  const filter = { site: siteId };
+  if (query.status && query.status !== 'ALL') filter.status = query.status;
+  if (query.customer) filter.customer = query.customer;
+  if (query.from || query.to) {
+    filter.createdAt = {};
+    if (query.from) filter.createdAt.$gte = new Date(query.from);
+    if (query.to) {
+      const to = new Date(query.to);
+      to.setHours(23, 59, 59, 999);
+      filter.createdAt.$lte = to;
+    }
+  }
+
+  const { page, limit, skip } = getPagination(query, { page: 1, limit: 10 });
+  const [rawItems, total] = await Promise.all([
+    Bill.find(filter).sort('-createdAt').skip(skip).limit(limit),
+    Bill.countDocuments(filter),
+  ]);
+
+  const items = rawItems.map((b) => ({ ...b.toObject(), ...computeLiveTotals(b) }));
+  return { items, meta: buildMeta({ page, limit, total }), site };
+}
+
 async function findOrCreateByAddress(address, extra = {}, session) {
   const normalizedAddress = address.trim().toLowerCase();
   let site = await Site.findOne({ normalizedAddress }).session(session ?? null);
@@ -31,39 +115,39 @@ async function createSite({ name, address, createdBy }) {
  *  breakdown (each customer who has ever had a bill at this site, with their
  *  own pending amount and bill count). Cancelled bills are excluded from the
  *  money totals but bills of every other status count. */
-async function aggregateStatsForSites(siteIds) {
-  const rows = await Bill.aggregate([
-    { $match: { site: { $in: siteIds }, status: { $ne: 'CANCELLED' } } },
-    {
-      $group: {
-        _id: { site: '$site', customer: '$customer', customerName: '$customerName', customerPhone: '$customerPhone' },
-        billAmount: { $sum: '$grandTotal' },
-        pendingAmount: { $sum: '$pendingAmount' },
-        billCount: { $sum: 1 },
-      },
-    },
-  ]);
+// async function aggregateStatsForSites(siteIds) {
+//   const rows = await Bill.aggregate([
+//     { $match: { site: { $in: siteIds }, status: { $ne: 'CANCELLED' } } },
+//     {
+//       $group: {
+//         _id: { site: '$site', customer: '$customer', customerName: '$customerName', customerPhone: '$customerPhone' },
+//         billAmount: { $sum: '$grandTotal' },
+//         pendingAmount: { $sum: '$pendingAmount' },
+//         billCount: { $sum: 1 },
+//       },
+//     },
+//   ]);
 
-  const bySite = new Map();
-  for (const row of rows) {
-    const siteKey = String(row._id.site);
-    if (!bySite.has(siteKey)) {
-      bySite.set(siteKey, { totalBillAmount: 0, totalPendingAmount: 0, customers: [] });
-    }
-    const entry = bySite.get(siteKey);
-    entry.totalBillAmount += row.billAmount;
-    entry.totalPendingAmount += row.pendingAmount;
-    entry.customers.push({
-      customerId: row._id.customer,
-      customerName: row._id.customerName,
-      customerPhone: row._id.customerPhone,
-      billAmount: Math.round(row.billAmount * 100) / 100,
-      pendingAmount: Math.round(row.pendingAmount * 100) / 100,
-      billCount: row.billCount,
-    });
-  }
-  return bySite;
-}
+//   const bySite = new Map();
+//   for (const row of rows) {
+//     const siteKey = String(row._id.site);
+//     if (!bySite.has(siteKey)) {
+//       bySite.set(siteKey, { totalBillAmount: 0, totalPendingAmount: 0, customers: [] });
+//     }
+//     const entry = bySite.get(siteKey);
+//     entry.totalBillAmount += row.billAmount;
+//     entry.totalPendingAmount += row.pendingAmount;
+//     entry.customers.push({
+//       customerId: row._id.customer,
+//       customerName: row._id.customerName,
+//       customerPhone: row._id.customerPhone,
+//       billAmount: Math.round(row.billAmount * 100) / 100,
+//       pendingAmount: Math.round(row.pendingAmount * 100) / 100,
+//       billCount: row.billCount,
+//     });
+//   }
+//   return bySite;
+// }
 
 async function listSites(query) {
   const { page, limit, skip } = getPagination(query, { page: 1, limit: 10 });

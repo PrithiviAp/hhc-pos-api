@@ -2,9 +2,9 @@ const Bill = require('../models/Bill');
 const Product = require('../models/Product');
 const Customer = require('../models/Customer');
 const StockMovement = require('../models/Stock');
-const { isBillOverdue } = require('./bill.service');
 const { getPagination, buildMeta } = require('../utils/pagination.util');
 const Expense = require('../models/Expense');
+const { isBillOverdue, computeLiveTotals } = require('./bill.service');
 
 const LOW_STOCK_THRESHOLD = 5;
 function dateRangeFilter(query) {
@@ -15,6 +15,29 @@ function dateRangeFilter(query) {
     if (query.to) filter.createdAt.$lte = new Date(query.to);
   }
   return filter;
+}
+
+
+async function overallPendingAmount() {
+  const [knownAgg, unknownBills] = await Promise.all([
+    Bill.aggregate([
+      { $match: { status: { $ne: 'CANCELLED' }, returnDateUnknown: { $ne: true } } },
+      { $group: { _id: null, total: { $sum: '$pendingAmount' } } },
+    ]),
+    Bill.find({ status: { $ne: 'CANCELLED' }, returnDateUnknown: true }),
+  ]);
+
+  let total = knownAgg[0]?.total ?? 0;
+  let hasAccruingPending = false;
+  const now = new Date();
+
+  for (const b of unknownBills) {
+    const { livePendingAmount } = computeLiveTotals(b, now);
+    total += livePendingAmount;
+    if (livePendingAmount > 0) hasAccruingPending = true;
+  }
+
+  return { total: Math.round(total * 100) / 100, hasAccruingPending };
 }
 
 async function overdueCount() {
@@ -182,19 +205,48 @@ async function todayBillsCount() {
   return Bill.countDocuments({ createdAt: { $gte: start, $lt: end }, status: { $ne: 'CANCELLED' } });
 }
 
+// async function dashboardStats() {
+//   const [income, stock, totalBillsToday, totalProducts, overallPending, overdue, totalExpensesToday, stockLevels] = await Promise.all([
+//     todayIncome(),
+//     todayStockMovement(),
+//     todayBillsCount(),
+//     Product.countDocuments({ isActive: true }),
+//     Bill.aggregate([
+//       { $match: { status: { $nin: ['CANCELLED'] } } },
+//       { $group: { _id: null, total: { $sum: '$pendingAmount' } } },
+//     ]),
+//     overdueCount(),
+//     todayExpensesTotal(),
+//     stockCounts(), // add
+//   ]);
+
+//   return {
+//     today: {
+//       totalSales: income.net,
+//       totalPayments: income.payments,
+//       totalRefunds: income.refunds,
+//       totalBills: totalBillsToday,
+//       stockIn: stock.stockIn,
+//       stockOut: stock.stockOut,
+//       totalExpenses: totalExpensesToday,
+//     },
+//     totalProducts,
+//     totalPendingAmount: overallPending[0]?.total ?? 0,
+//     overdueBillsCount: overdue,
+//     lowStockCount: stockLevels.lowStockCount, // add
+//     outOfStockCount: stockLevels.outOfStockCount, // add
+//   };
+// }
 async function dashboardStats() {
-  const [income, stock, totalBillsToday, totalProducts, overallPending, overdue, totalExpensesToday, stockLevels] = await Promise.all([
+  const [income, stock, totalBillsToday, totalProducts, pending, overdue, totalExpensesToday, stockLevels] = await Promise.all([
     todayIncome(),
     todayStockMovement(),
     todayBillsCount(),
     Product.countDocuments({ isActive: true }),
-    Bill.aggregate([
-      { $match: { status: { $nin: ['CANCELLED'] } } },
-      { $group: { _id: null, total: { $sum: '$pendingAmount' } } },
-    ]),
+    overallPendingAmount(),          // ← replaces the old Bill.aggregate call
     overdueCount(),
     todayExpensesTotal(),
-    stockCounts(), // add
+    stockCounts(),
   ]);
 
   return {
@@ -208,13 +260,13 @@ async function dashboardStats() {
       totalExpenses: totalExpensesToday,
     },
     totalProducts,
-    totalPendingAmount: overallPending[0]?.total ?? 0,
+    totalPendingAmount: pending.total,
+    hasAccruingPending: pending.hasAccruingPending,   // ← new, for an "as of today" caption
     overdueBillsCount: overdue,
-    lowStockCount: stockLevels.lowStockCount, // add
-    outOfStockCount: stockLevels.outOfStockCount, // add
+    lowStockCount: stockLevels.lowStockCount,
+    outOfStockCount: stockLevels.outOfStockCount,
   };
 }
-
 async function incomeTrend({ days = 14 } = {}) {
   const start = new Date();
   start.setHours(0, 0, 0, 0);
@@ -341,35 +393,66 @@ function buildDateStatusSearchFilter({ from, to, status, search, excludeCancelle
   return filter;
 }
 
+// async function salesReport(query) {
+//   const { page, limit, skip } = getPagination(query, { page: 1, limit: 10 });
+//   const filter = buildDateStatusSearchFilter(query);
+
+//   const [items, total] = await Promise.all([
+//     Bill.find(filter).sort('-createdAt').skip(skip).limit(limit).select(
+//       'billNumber customerName customerPhone createdAt subTotal discount grandTotal amountPaid pendingAmount refundDue paymentMethod status'
+//     ),
+//     Bill.countDocuments(filter),
+//   ]);
+
+//   const rows = items.map((b) => ({
+//     billNumber: b.billNumber,
+//     date: b.createdAt,
+//     customerName: b.customerName,
+//     customerPhone: b.customerPhone,
+//     subTotal: b.subTotal,
+//     discount: b.discount,
+//     grandTotal: b.grandTotal,
+//     amountPaid: b.amountPaid,
+//     pendingAmount: b.pendingAmount,
+//     refundDue: b.refundDue,
+//     paymentMethod: b.paymentMethod,
+//     status: b.status,
+//   }));
+
+//   return { items: rows, meta: buildMeta({ page, limit, total }) };
+// }
 async function salesReport(query) {
   const { page, limit, skip } = getPagination(query, { page: 1, limit: 10 });
   const filter = buildDateStatusSearchFilter(query);
 
   const [items, total] = await Promise.all([
     Bill.find(filter).sort('-createdAt').skip(skip).limit(limit).select(
-      'billNumber customerName customerPhone createdAt subTotal discount grandTotal amountPaid pendingAmount refundDue paymentMethod status'
+      'billNumber customerName customerPhone createdAt subTotal discount grandTotal amountPaid pendingAmount refundDue paymentMethod status returnDateUnknown items'
     ),
     Bill.countDocuments(filter),
   ]);
 
-  const rows = items.map((b) => ({
-    billNumber: b.billNumber,
-    date: b.createdAt,
-    customerName: b.customerName,
-    customerPhone: b.customerPhone,
-    subTotal: b.subTotal,
-    discount: b.discount,
-    grandTotal: b.grandTotal,
-    amountPaid: b.amountPaid,
-    pendingAmount: b.pendingAmount,
-    refundDue: b.refundDue,
-    paymentMethod: b.paymentMethod,
-    status: b.status,
-  }));
+  const now = new Date();
+  const rows = items.map((b) => {
+    const live = b.returnDateUnknown ? computeLiveTotals(b, now) : null;
+    return {
+      billNumber: b.billNumber,
+      date: b.createdAt,
+      customerName: b.customerName,
+      customerPhone: b.customerPhone,
+      subTotal: b.subTotal,
+      discount: b.discount,
+      grandTotal: live ? live.liveGrandTotal : b.grandTotal,
+      amountPaid: b.amountPaid,
+      pendingAmount: live ? live.livePendingAmount : b.pendingAmount,
+      refundDue: b.refundDue,
+      paymentMethod: b.paymentMethod,
+      status: b.status,
+    };
+  });
 
   return { items: rows, meta: buildMeta({ page, limit, total }) };
 }
-
 async function productsReport(query) {
   const { page, limit, skip } = getPagination(query, { page: 1, limit: 10 });
   const filter = buildDateStatusSearchFilter({ from: query.from, to: query.to, excludeCancelled: true });
@@ -421,9 +504,43 @@ async function productsReport(query) {
   return { items, meta: buildMeta({ page, limit, total }) };
 }
 
+// async function pendingReport(query) {
+//   const { page, limit, skip } = getPagination(query, { page: 1, limit: 10 });
+//   const filter = { status: { $nin: ['CANCELLED'] }, pendingAmount: { $gt: 0 } };
+//   if (query.search) {
+//     filter.$or = [
+//       { billNumber: new RegExp(query.search, 'i') },
+//       { customerName: new RegExp(query.search, 'i') },
+//       { customerPhone: new RegExp(query.search, 'i') },
+//     ];
+//   }
+
+//   const [items, total] = await Promise.all([
+//     Bill.find(filter).sort('-pendingAmount').skip(skip).limit(limit).select(
+//       'billNumber customerName customerPhone createdAt returnDate returnDateUnknown grandTotal amountPaid pendingAmount status'
+//     ),
+//     Bill.countDocuments(filter),
+//   ]);
+
+//   const now = new Date();
+//   const rows = items.map((b) => ({
+//     billNumber: b.billNumber,
+//     date: b.createdAt,
+//     customerName: b.customerName,
+//     customerPhone: b.customerPhone,
+//     grandTotal: b.grandTotal,
+//     amountPaid: b.amountPaid,
+//     pendingAmount: b.pendingAmount,
+//     status: b.status,
+//     isOverdue: isBillOverdue(b, now),
+//     returnDate: b.returnDateUnknown ? null : b.returnDate,
+//   }));
+
+//   return { items: rows, meta: buildMeta({ page, limit, total }) };
+// }
 async function pendingReport(query) {
   const { page, limit, skip } = getPagination(query, { page: 1, limit: 10 });
-  const filter = { status: { $nin: ['CANCELLED'] }, pendingAmount: { $gt: 0 } };
+  const filter = { status: { $nin: ['CANCELLED'] } };
   if (query.search) {
     filter.$or = [
       { billNumber: new RegExp(query.search, 'i') },
@@ -432,22 +549,38 @@ async function pendingReport(query) {
     ];
   }
 
-  const [items, total] = await Promise.all([
-    Bill.find(filter).sort('-pendingAmount').skip(skip).limit(limit).select(
-      'billNumber customerName customerPhone createdAt returnDate returnDateUnknown grandTotal amountPaid pendingAmount status'
-    ),
-    Bill.countDocuments(filter),
-  ]);
+  // Can't filter pendingAmount > 0 in the query itself — that field is
+  // stale for accruing bills. Fetch every non-cancelled candidate, compute
+  // each one's real pending amount, then filter/sort/paginate in JS.
+  const candidates = await Bill.find(filter).select(
+    'billNumber customerName customerPhone createdAt returnDate returnDateUnknown grandTotal subTotal discount amountPaid pendingAmount status items'
+  );
 
   const now = new Date();
-  const rows = items.map((b) => ({
+  const withLive = candidates
+    .map((b) => {
+      const live = b.returnDateUnknown ? computeLiveTotals(b, now) : null;
+      return {
+        doc: b,
+        grandTotal: live ? live.liveGrandTotal : b.grandTotal,
+        pendingAmount: live ? live.livePendingAmount : b.pendingAmount,
+      };
+    })
+    .filter((r) => r.pendingAmount > 0);
+
+  withLive.sort((a, b) => b.pendingAmount - a.pendingAmount);
+
+  const total = withLive.length;
+  const pageSlice = withLive.slice(skip, skip + limit);
+
+  const rows = pageSlice.map(({ doc: b, grandTotal, pendingAmount }) => ({
     billNumber: b.billNumber,
     date: b.createdAt,
     customerName: b.customerName,
     customerPhone: b.customerPhone,
-    grandTotal: b.grandTotal,
+    grandTotal,
     amountPaid: b.amountPaid,
-    pendingAmount: b.pendingAmount,
+    pendingAmount,
     status: b.status,
     isOverdue: isBillOverdue(b, now),
     returnDate: b.returnDateUnknown ? null : b.returnDate,
@@ -456,6 +589,39 @@ async function pendingReport(query) {
   return { items: rows, meta: buildMeta({ page, limit, total }) };
 }
 
+// async function billsReport(query) {
+//   const { page, limit, skip } = getPagination(query, { page: 1, limit: 10 });
+//   const filter = buildDateStatusSearchFilter({ ...query, excludeCancelled: false });
+
+//   const [items, total] = await Promise.all([
+//     Bill.find(filter).sort('-createdAt').skip(skip).limit(limit).select(
+//       'billNumber customerName customerPhone siteAddress items createdAt billingMode subTotal discount grandTotal amountPaid pendingAmount refundDue paymentMethod status returnDate returnDateUnknown'
+//     ),
+//     Bill.countDocuments(filter),
+//   ]);
+
+//   const rows = items.map((b) => ({
+//     billNumber: b.billNumber,
+//     date: b.createdAt,
+//     customerName: b.customerName,
+//     customerPhone: b.customerPhone,
+//     siteAddress: b.siteAddress,
+//     itemCount: b.items.length,
+//     itemsSummary: b.items.map((i) => `${i.name} x${i.quantity}`).join(', '),
+//     billingMode: b.billingMode,
+//     subTotal: b.subTotal,
+//     discount: b.discount,
+//     grandTotal: b.grandTotal,
+//     amountPaid: b.amountPaid,
+//     pendingAmount: b.pendingAmount,
+//     refundDue: b.refundDue,
+//     paymentMethod: b.paymentMethod,
+//     status: b.status,
+//     returnDate: b.returnDateUnknown ? null : b.returnDate,
+//   }));
+
+//   return { items: rows, meta: buildMeta({ page, limit, total }) };
+// }
 async function billsReport(query) {
   const { page, limit, skip } = getPagination(query, { page: 1, limit: 10 });
   const filter = buildDateStatusSearchFilter({ ...query, excludeCancelled: false });
@@ -467,29 +633,32 @@ async function billsReport(query) {
     Bill.countDocuments(filter),
   ]);
 
-  const rows = items.map((b) => ({
-    billNumber: b.billNumber,
-    date: b.createdAt,
-    customerName: b.customerName,
-    customerPhone: b.customerPhone,
-    siteAddress: b.siteAddress,
-    itemCount: b.items.length,
-    itemsSummary: b.items.map((i) => `${i.name} x${i.quantity}`).join(', '),
-    billingMode: b.billingMode,
-    subTotal: b.subTotal,
-    discount: b.discount,
-    grandTotal: b.grandTotal,
-    amountPaid: b.amountPaid,
-    pendingAmount: b.pendingAmount,
-    refundDue: b.refundDue,
-    paymentMethod: b.paymentMethod,
-    status: b.status,
-    returnDate: b.returnDateUnknown ? null : b.returnDate,
-  }));
+  const now = new Date();
+  const rows = items.map((b) => {
+    const live = b.returnDateUnknown ? computeLiveTotals(b, now) : null;
+    return {
+      billNumber: b.billNumber,
+      date: b.createdAt,
+      customerName: b.customerName,
+      customerPhone: b.customerPhone,
+      siteAddress: b.siteAddress,
+      itemCount: b.items.length,
+      itemsSummary: b.items.map((i) => `${i.name} x${i.quantity}`).join(', '),
+      billingMode: b.billingMode,
+      subTotal: b.subTotal,
+      discount: b.discount,
+      grandTotal: live ? live.liveGrandTotal : b.grandTotal,
+      amountPaid: b.amountPaid,
+      pendingAmount: live ? live.livePendingAmount : b.pendingAmount,
+      refundDue: b.refundDue,
+      paymentMethod: b.paymentMethod,
+      status: b.status,
+      returnDate: b.returnDateUnknown ? null : b.returnDate,
+    };
+  });
 
   return { items: rows, meta: buildMeta({ page, limit, total }) };
 }
-
 function buildPaymentMethodMatch(query) {
   const match = { 'paymentHistory.type': 'PAYMENT' };
   if (query.method && query.method !== 'ALL') {

@@ -20,5 +20,9 @@ const drilldown = asyncHandler(async (req, res) => {
   const items = await service.getDrilldown(req.query);
   new ApiResponse(200, items, 'Stock drilldown fetched').send(res);
 });
+const categorySummary = asyncHandler(async (req, res) => {
+  const data = await service.getCategorySummary(req.query);
+  new ApiResponse(200, data, 'Category stock summary fetched').send(res);
+});
 
-module.exports = { create, list, summary, drilldown };
+module.exports = { create, list, summary, drilldown, categorySummary };

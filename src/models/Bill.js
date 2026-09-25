@@ -14,7 +14,7 @@ const billItemSchema = new mongoose.Schema(
     billingMode: { type: String, enum: ['DAILY', 'OPEN'], required: true },
 
     returnDate: { type: Date },
-
+notes: { type: String, trim: true, maxlength: 1000 },
     // What was actually billed upfront for DAILY items — the baseline
     // recordReturn compares actual days used against, to refund an early
     // return or charge extra for a late one.
@@ -24,6 +24,7 @@ const billItemSchema = new mongoose.Schema(
 
     lastReturnedAt: { type: Date },
     total: { type: Number, required: true, default: 0 },
+    alertDueDateOverride: { type: Date, default: null }, 
     alertAcknowledgedAt: { type: Date, default: null },
   },
   { _id: false }

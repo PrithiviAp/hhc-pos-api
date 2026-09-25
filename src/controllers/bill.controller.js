@@ -49,5 +49,17 @@ const acknowledgeAlert = asyncHandler(async (req, res) => {
   const bill = await service.acknowledgeBillAlert(req.params.id, req.body.product);
   new ApiResponse(200, bill, 'Alert marked as read').send(res);
 });
+const updateAlertDate = asyncHandler(async (req, res) => {
+  const { product, dueDate } = req.body;
+  if (!product) throw new (require('../utils/ApiError'))().badRequest?.('product is required') || null;
+  const bill = await service.updateAlertDueDate(req.params.id, product, dueDate);
+  new ApiResponse(200, bill, 'Alert date updated').send(res);
+});
 
-module.exports = { create, list, getOne, cancel, returnItems, pay, alerts, acknowledgeAlert };
+const matrix = asyncHandler(async (req, res) => {
+  const data = await service.getStockMatrix();
+  new ApiResponse(200, data, 'Stock matrix fetched').send(res);
+});
+
+
+module.exports = { list, getOne, create, cancel, returnItems, pay, alerts, acknowledgeAlert, updateAlertDate,matrix };

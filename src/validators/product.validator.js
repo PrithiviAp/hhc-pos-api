@@ -30,6 +30,19 @@ body('alertDays').custom((value, { req }) => {
   }
   return true;
 }),
+body('qtyRateEnabled').optional().isBoolean().withMessage('qtyRateEnabled must be true or false'),
+body('qtyRates').custom((value, { req }) => {
+  const enabled = req.body.qtyRateEnabled === true || req.body.qtyRateEnabled === 'true';
+  if (!enabled) return true;
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new Error('At least one quantity-wise rate is required when qty-wise rate is enabled');
+  }
+  for (const tier of value) {
+    if (tier.minQty == null || Number(tier.minQty) <= 0) throw new Error('Each tier needs a quantity greater than 0');
+    if (tier.rate == null || Number(tier.rate) < 0) throw new Error('Each tier needs a valid rate');
+  }
+  return true;
+}),
 ];
 
 module.exports = { productValidator };

@@ -1,9 +1,32 @@
+const mongoose = require('mongoose');
+const Category = require('../models/Category');
 const ApiError = require('../utils/ApiError');
 const { getPagination, buildMeta } = require('../utils/pagination.util');
 const productRepository = require('../repositories/product.repository');
+const TRACKED_FIELDS = ['name', 'nameTa', 'category', 'perDayRate', 'unit', 'quantityInStock', 'isActive', 'alertEnabled', 'alertDays', 'qtyRateEnabled', 'qtyRates'];
+const LOW_STOCK_THRESHOLD = 5;
 
-const TRACKED_FIELDS = ['name', 'nameTa', 'category', 'perDayRate', 'unit', 'quantityInStock', 'isActive', 'alertEnabled', 'alertDate'];
-const LOW_STOCK_THRESHOLD = 5; 
+
+function escapeRegex(str) {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+async function resolveCategoryField(data) {
+  if (data.category === undefined || data.category === null) return data;
+  const raw = String(data.category).trim();
+  if (!raw) {
+    const { category, ...rest } = data;
+    return rest;
+  }
+  if (mongoose.Types.ObjectId.isValid(raw) && String(new mongoose.Types.ObjectId(raw)) === raw) {
+    return { ...data, category: raw };
+  }
+  let cat = await Category.findOne({ name: new RegExp(`^${escapeRegex(raw)}$`, 'i') });
+  if (!cat) {
+    cat = await Category.create({ name: raw });
+  }
+  return { ...data, category: cat._id };
+}
 
 async function listProducts(query) {
   const { page, limit, skip } = getPagination(query);
@@ -40,6 +63,25 @@ async function getProduct(id) {
   return product;
 }
 
+
+function normalizeQtyRateFields(data) {
+  if (data.qtyRateEnabled === false || data.qtyRateEnabled === 'false' || data.qtyRateEnabled === undefined) {
+    if ('qtyRateEnabled' in data || 'qtyRates' in data) {
+      return { ...data, qtyRateEnabled: false, qtyRates: [] };
+    }
+    return data;
+  }
+  if (data.qtyRateEnabled === true || data.qtyRateEnabled === 'true') {
+    const tiers = Array.isArray(data.qtyRates) ? data.qtyRates : [];
+    if (tiers.length === 0) throw ApiError.badRequest('At least one quantity-wise rate is required when the toggle is enabled');
+    const normalized = tiers
+      .map((t) => ({ minQty: Number(t.minQty), rate: Number(t.rate) }))
+      .sort((a, b) => a.minQty - b.minQty);
+    return { ...data, qtyRateEnabled: true, qtyRates: normalized };
+  }
+  return data;
+}
+
 /** Normalizes the alert pair so the two fields never contradict each other
  *  in storage: alertEnabled=false always means alertDate=null, and
  *  alertEnabled=true requires a real date (already enforced at the
@@ -59,8 +101,55 @@ function normalizeAlertFields(data) {
   return data;
 }
 
+// async function createProduct(data, performedBy) {
+//  const payload = normalizeQtyRateFields(
+//     normalizeAlertFields({ ...data, perDayRate: Number(data.perDayRate), unit: 'Qty' })
+//   );
+//   if (!payload.name || !String(payload.name).trim()) {
+//     throw ApiError.badRequest('name is required');
+//   }
+//   if (Number.isNaN(payload.perDayRate) || payload.perDayRate < 0) {
+//     throw ApiError.badRequest(`perDayRate is invalid for "${payload.name}"`);
+//   }
+//   const product = await productRepository.create(payload);
+//   await productRepository.addHistory({
+//     product: product._id,
+//     action: 'CREATE',
+//     changes: TRACKED_FIELDS.filter((f) => product[f] !== undefined).map((f) => ({ field: f, oldValue: null, newValue: product[f] })),
+//     performedBy,
+//   });
+//   return product;
+// }
+
+// async function createProduct(data, performedBy) {
+//   const payload = normalizeQtyRateFields(
+//     normalizeAlertFields({ ...data, perDayRate: Number(data.perDayRate), unit: 'Qty' })
+//   );
+//   if (!payload.name || !String(payload.name).trim()) {
+//     throw ApiError.badRequest('name is required');
+//   }
+//   if (Number.isNaN(payload.perDayRate) || payload.perDayRate < 0) {
+//     throw ApiError.badRequest(`perDayRate is invalid for "${payload.name}"`);
+//   }
+//   const product = await productRepository.create(payload);
+//   await productRepository.addHistory({
+//     product: product._id,
+//     action: 'CREATE',
+//     changes: TRACKED_FIELDS.filter((f) => product[f] !== undefined).map((f) => ({
+//       field: f,
+//       oldValue: null,
+//       newValue: f === 'category' ? (product.category?.name ?? null) : product[f],
+//     })),
+//     performedBy,
+//   });
+//   return product;
+// }
+
 async function createProduct(data, performedBy) {
-  const payload = normalizeAlertFields({ ...data, perDayRate: Number(data.perDayRate), unit: 'Qty' });
+  const withCategory = await resolveCategoryField(data);
+  const payload = normalizeQtyRateFields(
+    normalizeAlertFields({ ...withCategory, perDayRate: Number(withCategory.perDayRate), unit: 'Qty' })
+  );
   if (!payload.name || !String(payload.name).trim()) {
     throw ApiError.badRequest('name is required');
   }
@@ -71,7 +160,11 @@ async function createProduct(data, performedBy) {
   await productRepository.addHistory({
     product: product._id,
     action: 'CREATE',
-    changes: TRACKED_FIELDS.filter((f) => product[f] !== undefined).map((f) => ({ field: f, oldValue: null, newValue: product[f] })),
+    changes: TRACKED_FIELDS.filter((f) => product[f] !== undefined).map((f) => ({
+      field: f,
+      oldValue: null,
+      newValue: f === 'category' ? (product.category?.name ?? null) : product[f],
+    })),
     performedBy,
   });
   return product;
@@ -103,19 +196,80 @@ async function bulkCreateProducts(items, performedBy) {
   return { created, failed };
 }
 
+// async function updateProduct(id, data, performedBy) {
+//   const existing = await productRepository.findById(id);
+//   if (!existing) throw ApiError.notFound('Product not found');
+
+//   const payload = normalizeQtyRateFields(
+//     normalizeAlertFields({
+//       ...data,
+//       ...(data.perDayRate !== undefined ? { perDayRate: Number(data.perDayRate) } : {}),
+//     })
+//   );
+//   const updated = await productRepository.update(id, payload);
+
+//   const changes = TRACKED_FIELDS.filter((f) => f in payload)
+//     .map((f) => ({ field: f, oldValue: existing[f], newValue: updated[f] }))
+//     .filter((c) => String(c.oldValue) !== String(c.newValue));
+//   if (changes.length > 0) {
+//     await productRepository.addHistory({ product: id, action: 'UPDATE', changes, performedBy });
+//   }
+//   return updated;
+// }
+
+// async function updateProduct(id, data, performedBy) {
+//   const existing = await productRepository.findById(id);
+//   if (!existing) throw ApiError.notFound('Product not found');
+
+//   const payload = normalizeQtyRateFields(
+//     normalizeAlertFields({
+//       ...data,
+//       ...(data.perDayRate !== undefined ? { perDayRate: Number(data.perDayRate) } : {}),
+//     })
+//   );
+//   const updated = await productRepository.update(id, payload);
+
+//   const changes = TRACKED_FIELDS.filter((f) => f in payload)
+//     .map((f) => {
+//       if (f === 'category') {
+//         return {
+//           field: f,
+//           oldValue: existing.category?.name ?? null,
+//           newValue: updated.category?.name ?? null,
+//         };
+//       }
+//       return { field: f, oldValue: existing[f], newValue: updated[f] };
+//     })
+//     .filter((c) => String(c.oldValue) !== String(c.newValue));
+
+//   if (changes.length > 0) {
+//     await productRepository.addHistory({ product: id, action: 'UPDATE', changes, performedBy });
+//   }
+//   return updated;
+// }
+
 async function updateProduct(id, data, performedBy) {
   const existing = await productRepository.findById(id);
   if (!existing) throw ApiError.notFound('Product not found');
 
-  const payload = normalizeAlertFields({
-    ...data,
-    ...(data.perDayRate !== undefined ? { perDayRate: Number(data.perDayRate) } : {}),
-  });
+  const withCategory = await resolveCategoryField(data);
+  const payload = normalizeQtyRateFields(
+    normalizeAlertFields({
+      ...withCategory,
+      ...(withCategory.perDayRate !== undefined ? { perDayRate: Number(withCategory.perDayRate) } : {}),
+    })
+  );
   const updated = await productRepository.update(id, payload);
 
   const changes = TRACKED_FIELDS.filter((f) => f in payload)
-    .map((f) => ({ field: f, oldValue: existing[f], newValue: updated[f] }))
+    .map((f) => {
+      if (f === 'category') {
+        return { field: f, oldValue: existing.category?.name ?? null, newValue: updated.category?.name ?? null };
+      }
+      return { field: f, oldValue: existing[f], newValue: updated[f] };
+    })
     .filter((c) => String(c.oldValue) !== String(c.newValue));
+
   if (changes.length > 0) {
     await productRepository.addHistory({ product: id, action: 'UPDATE', changes, performedBy });
   }

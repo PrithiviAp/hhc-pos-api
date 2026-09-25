@@ -141,4 +141,71 @@ async function getDrilldown({ product, fromDate, toDate, type }) {
   });
 }
 
-module.exports = { recordMovement, listMovements, getSummary, getDrilldown };
+/** Category-grouped ledger report, matching the physical stock-register
+ *  format: Count (opening balance) / In / Out / Total (closing balance)
+ *  per product, grouped under its category. Includes every active product
+ *  (not just ones with movement in the range) so a category's full sheet
+ *  always renders, with zero rows for untouched products — same as the
+ *  paper ledger. "Count" is derived as total - in + out rather than stored,
+ *  since only the live current stock (total) is tracked; for a "today"
+ *  range this is exactly the opening balance for the day. */
+async function getCategorySummary(query) {
+  const today = todayIST();
+  const fromStr = query.fromDate || today;
+  const toStr = query.toDate || fromStr;
+  const { start, end } = dateRangeIST(fromStr, toStr);
+
+  const [products, movementAgg] = await Promise.all([
+    Product.find({ isActive: true })
+      .populate('category', 'name nameTa')
+      .sort('name')
+      .select('name category quantityInStock'),
+    StockMovement.aggregate([
+      { $match: { createdAt: { $gte: start, $lt: end } } },
+      { $group: { _id: { product: '$product', type: '$type' }, qty: { $sum: '$quantity' } } },
+    ]),
+  ]);
+
+  const totals = {};
+  for (const row of movementAgg) {
+    const pid = row._id.product.toString();
+    totals[pid] = totals[pid] || { IN: 0, OUT: 0 };
+    if (row._id.type === 'IN' || row._id.type === 'OUT') totals[pid][row._id.type] = row.qty;
+  }
+
+  const groupsMap = new Map();
+
+  for (const p of products) {
+    const catId = p.category?._id ? p.category._id.toString() : 'uncategorized';
+    const catName = p.category?.name || 'Uncategorized';
+    if (!groupsMap.has(catId)) {
+      groupsMap.set(catId, {
+        categoryId: catId === 'uncategorized' ? null : catId,
+        categoryName: catName,
+        products: [],
+      });
+    }
+
+    const rangeIn = totals[p._id.toString()]?.IN || 0;
+    const rangeOut = totals[p._id.toString()]?.OUT || 0;
+    const total = p.quantityInStock;
+    const count = Math.max(total - rangeIn + rangeOut, 0);
+
+    groupsMap.get(catId).products.push({
+      productId: p._id,
+      name: p.name,
+      count,
+      in: rangeIn,
+      out: rangeOut,
+      total,
+    });
+  }
+
+  const groups = Array.from(groupsMap.values()).sort((a, b) =>
+    a.categoryName === 'Uncategorized' ? 1 : b.categoryName === 'Uncategorized' ? -1 : a.categoryName.localeCompare(b.categoryName)
+  );
+
+  return { groups, fromDate: fromStr, toDate: toStr };
+}
+
+module.exports = { recordMovement, listMovements, getSummary, getDrilldown, getCategorySummary };
