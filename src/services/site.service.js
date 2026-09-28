@@ -9,6 +9,12 @@ const { computeLiveTotals } = require('./bill.service');
  *  siteAddress. Since address is globally unique, this never depends on
  *  which customer is asking. */
 
+function isBillAccruing(bill) {
+  if (bill.returnDateUnknown) return true;
+  return bill.items.some((i) => i.billingMode === 'OPEN' && (i.quantity - i.quantityReturned) > 0);
+}
+
+
 async function aggregateStatsForSites(siteIds) {
   const bills = await Bill.find({ site: { $in: siteIds }, status: { $ne: 'CANCELLED' } });
 
@@ -23,7 +29,7 @@ async function aggregateStatsForSites(siteIds) {
 
     let billAmount = bill.grandTotal;
     let pendingAmount = bill.pendingAmount;
-    if (bill.returnDateUnknown) {
+    if (bill.returnDateUnknown) {                 // ← THIS is the line to change
       const { liveGrandTotal, livePendingAmount } = computeLiveTotals(bill);
       billAmount = liveGrandTotal;
       pendingAmount = livePendingAmount;

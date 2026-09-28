@@ -17,10 +17,15 @@ function derivePaymentStatus(amountPaid, grandTotal) {
 
 /** True while a bill's true cost is still a moving target — open-ended
  *  billing with no fixed return date, and not yet actually returned. */
-function isLiveBill(bill) {
-  return bill.returnDateUnknown && bill.status !== 'RETURNED';
-}
+// function isLiveBill(bill) {
+//   return bill.returnDateUnknown && bill.status !== 'RETURNED';
+// }
 
+function isLiveBill(bill) {
+  if (bill.status === 'RETURNED') return false;
+  if (bill.returnDateUnknown) return true;
+  return bill.items.some((i) => i.billingMode === 'OPEN' && (i.quantity - i.quantityReturned) > 0);
+}
 /** What a single bill currently owes, right now — the live per-day total
  *  for open/unreturned bills, the stored figure otherwise. Mirrors the
  *  same distinction bill-history.html already draws in the UI. */
@@ -317,11 +322,11 @@ const shortfall = Math.round((totalOwedToday - amount) * 100) / 100;
 const overpayment = shortfall < 0 ? -shortfall : 0;
 
 
-if (shortfall > 0.004 && returnAllProducts && !discountRemaining) {
-  throw ApiError.badRequest(
-    `Amount received (₹${amount.toFixed(2)}) is ₹${shortfall.toFixed(2)} short of today's pending total (₹${totalOwedToday.toFixed(2)}). Choose "Discount remaining" to return everything, or lower "Return all products".`
-  );
-}
+// if (shortfall > 0.004 && returnAllProducts && !discountRemaining) {
+//   throw ApiError.badRequest(
+//     `Amount received (₹${amount.toFixed(2)}) is ₹${shortfall.toFixed(2)} short of today's pending total (₹${totalOwedToday.toFixed(2)}). Choose "Discount remaining" to return everything, or lower "Return all products".`
+//   );
+// }
   if (overpayment > 0) {
     const requestedRefund = refundGivenNow != null ? Math.max(refundGivenNow, 0) : 0;
     if (requestedRefund <= 0 && !waiveOverpayment) {
@@ -359,35 +364,72 @@ const discountPerBill = discountApplied > 0
       });
     }
 
+    // if (returnAllProducts) {
+    //   const returnedItems = bill.items
+    //     .filter((i) => i.quantityReturned < i.quantity)
+    //     .map((i) => ({ product: i.product, name: i.name, quantity: i.quantity - i.quantityReturned }));
+    //   for (const item of bill.items) item.quantityReturned = item.quantity;
+
+    //   if (isLive && liveGrandTotal != null) {
+    //     bill.grandTotal = liveGrandTotal; // freeze the accruing bill at today's value
+    //   }
+    //   bill.discount = Math.round(((bill.discount || 0) + discountNow) * 100) / 100;
+    //   bill.pendingAmount = 0;
+    //   bill.paymentStatus = 'PAID';
+    //   bill.status = 'RETURNED';
+    //   bill.returnedAt = new Date();
+
+    //   bill.returnHistory.push({
+    //     returnedAt: new Date(),
+    //     items: returnedItems,
+    //     amountPaidNow: paidNow,
+    //     refundGivenNow: 0,
+    //     refundWaived: false,
+    //     overdueAmount: 0,
+    //     waived: discountNow > 0,
+    //     discountAdjustment: discountNow,
+    //     remainingWaived: discountNow > 0,
+    //     remainingWaivedAmount: discountNow,
+    //   });
+    //   billsReturned += 1;
+    // } 
     if (returnAllProducts) {
-      const returnedItems = bill.items
-        .filter((i) => i.quantityReturned < i.quantity)
-        .map((i) => ({ product: i.product, name: i.name, quantity: i.quantity - i.quantityReturned }));
-      for (const item of bill.items) item.quantityReturned = item.quantity;
+  const returnedItems = bill.items
+    .filter((i) => i.quantityReturned < i.quantity)
+    .map((i) => ({ product: i.product, name: i.name, quantity: i.quantity - i.quantityReturned }));
+  for (const item of bill.items) item.quantityReturned = item.quantity;
 
-      if (isLive && liveGrandTotal != null) {
-        bill.grandTotal = liveGrandTotal; // freeze the accruing bill at today's value
-      }
-      bill.discount = Math.round(((bill.discount || 0) + discountNow) * 100) / 100;
-      bill.pendingAmount = 0;
-      bill.paymentStatus = 'PAID';
-      bill.status = 'RETURNED';
-      bill.returnedAt = new Date();
+  if (isLive && liveGrandTotal != null) {
+    bill.grandTotal = liveGrandTotal; // freeze the accruing bill at today's value
+  }
+  bill.discount = Math.round(((bill.discount || 0) + discountNow) * 100) / 100;
+  if (discountNow > 0) {
+    bill.grandTotal = Math.max(Math.round((bill.grandTotal - discountNow) * 100) / 100, 0);
+  }
 
-      bill.returnHistory.push({
-        returnedAt: new Date(),
-        items: returnedItems,
-        amountPaidNow: paidNow,
-        refundGivenNow: 0,
-        refundWaived: false,
-        overdueAmount: 0,
-        waived: discountNow > 0,
-        discountAdjustment: discountNow,
-        remainingWaived: discountNow > 0,
-        remainingWaivedAmount: discountNow,
-      });
-      billsReturned += 1;
-    } else if (discountNow > 0) {
+  // ← was: bill.pendingAmount = 0; bill.paymentStatus = 'PAID';
+  const remainingAfter = Math.max(Math.round((owed - paidNow - discountNow) * 100) / 100, 0);
+  bill.pendingAmount = remainingAfter;
+  bill.paymentStatus = remainingAfter === 0 ? 'PAID' : 'PARTIAL';
+
+  bill.status = 'RETURNED';
+  bill.returnedAt = new Date();
+
+  bill.returnHistory.push({
+    returnedAt: new Date(),
+    items: returnedItems,
+    amountPaidNow: paidNow,
+    refundGivenNow: 0,
+    refundWaived: false,
+    overdueAmount: 0,
+    waived: discountNow > 0,
+    discountAdjustment: discountNow,
+    remainingWaived: discountNow > 0,
+    remainingWaivedAmount: discountNow,
+  });
+  billsReturned += 1;
+}
+    else if (discountNow > 0) {
       // Discount-only path — items stay as-is. Live/OPEN bills are left
       // untouched so they recompute fresh tomorrow (that's the point).
       if (!isLive) {

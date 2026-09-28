@@ -124,7 +124,7 @@ function addDays(d, days) { const x = new Date(d); x.setDate(x.getDate() + days)
 
 async function createBill({
   customerName, customerPhone, siteAddress, site, items, discount = 0,
-  amountPaid, paymentMethod = 'CASH', returnDate, billingMode = 'DAILY',
+  amountPaid, paymentMethod = 'CASH', returnDate, borrowDate, billingMode = 'DAILY',
   productWiseMode = false, returnDateUnknown = false, notes, createdBy,
 }) {
   if (!items?.length) throw ApiError.badRequest('Bill must contain at least one item');
@@ -147,7 +147,9 @@ async function createBill({
     await session.withTransaction(async () => {
       const billItems = [];
       let subTotal = 0;
-      const now = new Date();
+     const now = new Date();
+const borrowedAt = borrowDate ? new Date(borrowDate) : now;
+if (Number.isNaN(borrowedAt.getTime())) throw ApiError.badRequest('Invalid borrow date');
       const billId = new mongoose.Types.ObjectId();
 
       for (const line of items) {
@@ -169,7 +171,8 @@ async function createBill({
   if (lineBillingMode === 'DAILY') {
   const rateUsed = resolveEffectiveRate(product, line.quantity); 
           if (!rateUsed) throw ApiError.badRequest(`${product.name} has no daily rate set`);
-          const days = productWiseMode ? daysBetween(now, line.returnDate) : daysBetween(now, returnDate);
+       const days = productWiseMode ? daysBetween(borrowedAt, line.returnDate) : daysBetween(borrowedAt, returnDate);
+
           const lineTotal = Math.round(rateUsed * days * line.quantity * 100) / 100;
 
           billItem = {
@@ -200,10 +203,11 @@ async function createBill({
 
         product.quantityInStock -= baseQuantity;
         await product.save({ session });
-        await StockMovement.create(
-          [{ product: product._id, type: 'OUT', quantity: baseQuantity, reason: 'Borrowed', bill: billId, performedBy: createdBy }],
-          { session }
-        );
+  await StockMovement.create(
+  [{ product: product._id, type: 'OUT', quantity: baseQuantity, reason: 'Borrowed',
+     bill: billId, performedBy: createdBy, createdAt: borrowedAt }],
+  { session }
+);
       }
 
       const grandTotal = Math.max(subTotal - discount, 0);
@@ -236,6 +240,7 @@ async function createBill({
 
       const [createdBill] = await Bill.create([{
         _id: billId,
+        createdAt: borrowedAt, 
         billNumber, customer: customer._id, customerName, customerPhone, siteAddress,
         site: siteDoc?._id,
         items: billItems, subTotal, discount, grandTotal,
