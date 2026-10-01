@@ -9,31 +9,111 @@ const { computeLiveTotals } = require('./bill.service');
  *  siteAddress. Since address is globally unique, this never depends on
  *  which customer is asking. */
 
+// function isBillAccruing(bill) {
+//   if (bill.returnDateUnknown) return true;
+//   return bill.items.some((i) => i.billingMode === 'OPEN' && (i.quantity - i.quantityReturned) > 0);
+// }
+
 function isBillAccruing(bill) {
+  if (bill.status === 'RETURNED' || bill.status === 'CANCELLED') return false;
   if (bill.returnDateUnknown) return true;
   return bill.items.some((i) => i.billingMode === 'OPEN' && (i.quantity - i.quantityReturned) > 0);
 }
 
 
+function waivedAmountOf(bill) {
+  const fromReturns = (bill.returnHistory || []).reduce((s, e) => s + (e.remainingWaivedAmount || 0), 0);
+  return fromReturns + (bill.paymentWaivedAmount || 0);
+}
+
+
+function refundedAmountOf(bill) {
+  return (bill.paymentHistory || [])
+    .filter((e) => e.type === 'REFUND')
+    .reduce((s, e) => s + e.amount, 0);
+}
+
+const r2 = (n) => Math.round(n * 100) / 100;
+
+// async function aggregateStatsForSites(siteIds) {
+//   const bills = await Bill.find({ site: { $in: siteIds }, status: { $ne: 'CANCELLED' } });
+
+//   const bySite = new Map();
+
+//   for (const bill of bills) {
+//     const siteKey = String(bill.site);
+//     if (!bySite.has(siteKey)) {
+//       bySite.set(siteKey, { totalBillAmount: 0, totalPendingAmount: 0, customersMap: new Map() });
+//     }
+//     const entry = bySite.get(siteKey);
+
+//     let billAmount = bill.grandTotal;
+//     let pendingAmount = bill.pendingAmount;
+//     if (bill.returnDateUnknown) {                 // ← THIS is the line to change
+//       const { liveGrandTotal, livePendingAmount } = computeLiveTotals(bill);
+//       billAmount = liveGrandTotal;
+//       pendingAmount = livePendingAmount;
+//     }
+
+//     entry.totalBillAmount += billAmount;
+//     entry.totalPendingAmount += pendingAmount;
+
+//     const custKey = String(bill.customer);
+//     let cust = entry.customersMap.get(custKey);
+//     if (!cust) {
+//       cust = {
+//         customerId: bill.customer,
+//         customerName: bill.customerName,
+//         customerPhone: bill.customerPhone,
+//         billAmount: 0,
+//         pendingAmount: 0,
+//         billCount: 0,
+//       };
+//       entry.customersMap.set(custKey, cust);
+//     }
+//     cust.billAmount += billAmount;
+//     cust.pendingAmount += pendingAmount;
+//     cust.billCount += 1;
+//   }
+
+//   const result = new Map();
+//   for (const [siteKey, entry] of bySite) {
+//     result.set(siteKey, {
+//       totalBillAmount: entry.totalBillAmount,
+//       totalPendingAmount: entry.totalPendingAmount,
+//       customers: Array.from(entry.customersMap.values()).map((c) => ({
+//         ...c,
+//         billAmount: Math.round(c.billAmount * 100) / 100,
+//         pendingAmount: Math.round(c.pendingAmount * 100) / 100,
+//       })),
+//     });
+//   }
+//   return result;
+// }
+
 async function aggregateStatsForSites(siteIds) {
   const bills = await Bill.find({ site: { $in: siteIds }, status: { $ne: 'CANCELLED' } });
-
   const bySite = new Map();
 
   for (const bill of bills) {
     const siteKey = String(bill.site);
     if (!bySite.has(siteKey)) {
-      bySite.set(siteKey, { totalBillAmount: 0, totalPendingAmount: 0, customersMap: new Map() });
+      bySite.set(siteKey, { totalBillAmount: 0, totalPendingAmount: 0, hasAccruing: false, customersMap: new Map() });
     }
     const entry = bySite.get(siteKey);
 
+    const accruing = isBillAccruing(bill);
     let billAmount = bill.grandTotal;
     let pendingAmount = bill.pendingAmount;
-    if (bill.returnDateUnknown) {                 // ← THIS is the line to change
+    if (accruing) {
       const { liveGrandTotal, livePendingAmount } = computeLiveTotals(bill);
       billAmount = liveGrandTotal;
       pendingAmount = livePendingAmount;
+      entry.hasAccruing = true;
     }
+
+    const waived = waivedAmountOf(bill);
+    billAmount += waived;                       // bill amount + waived
 
     entry.totalBillAmount += billAmount;
     entry.totalPendingAmount += pendingAmount;
@@ -45,13 +125,15 @@ async function aggregateStatsForSites(siteIds) {
         customerId: bill.customer,
         customerName: bill.customerName,
         customerPhone: bill.customerPhone,
-        billAmount: 0,
-        pendingAmount: 0,
-        billCount: 0,
+        billAmount: 0, paidAmount: 0, refundedAmount: 0, waivedAmount: 0,
+        pendingAmount: 0, billCount: 0,
       };
       entry.customersMap.set(custKey, cust);
     }
     cust.billAmount += billAmount;
+    cust.paidAmount += bill.amountPaid || 0;
+    cust.refundedAmount += refundedAmountOf(bill);
+    cust.waivedAmount += waived;
     cust.pendingAmount += pendingAmount;
     cust.billCount += 1;
   }
@@ -61,10 +143,14 @@ async function aggregateStatsForSites(siteIds) {
     result.set(siteKey, {
       totalBillAmount: entry.totalBillAmount,
       totalPendingAmount: entry.totalPendingAmount,
+      hasAccruing: entry.hasAccruing,
       customers: Array.from(entry.customersMap.values()).map((c) => ({
         ...c,
-        billAmount: Math.round(c.billAmount * 100) / 100,
-        pendingAmount: Math.round(c.pendingAmount * 100) / 100,
+        billAmount: r2(c.billAmount),
+        paidAmount: r2(c.paidAmount),
+        refundedAmount: r2(c.refundedAmount),
+        waivedAmount: r2(c.waivedAmount),
+        pendingAmount: r2(c.pendingAmount),
       })),
     });
   }
@@ -94,8 +180,8 @@ async function getSiteBills(siteId, query) {
     Bill.countDocuments(filter),
   ]);
 
-  const items = rawItems.map((b) => ({ ...b.toObject(), ...computeLiveTotals(b) }));
-  return { items, meta: buildMeta({ page, limit, total }), site };
+const items = rawItems.map((b) => ({ ...b.toObject(), ...computeLiveTotals(b) }));
+return { items, meta: buildMeta({ page, limit, total }), site };
 }
 
 async function findOrCreateByAddress(address, extra = {}, session) {
@@ -178,6 +264,7 @@ async function listSites(query) {
       totalPendingAmount: Math.round((stats?.totalPendingAmount ?? 0) * 100) / 100,
       customerCount: stats?.customers.length ?? 0,
       customers: stats?.customers ?? [],
+      hasAccruing: stats?.hasAccruing ?? false, 
     };
   });
 
@@ -197,6 +284,7 @@ async function getSite(id) {
     totalPendingAmount: Math.round((stats?.totalPendingAmount ?? 0) * 100) / 100,
     customerCount: stats?.customers.length ?? 0,
     customers: stats?.customers ?? [],
+  hasAccruing: stats?.hasAccruing ?? false, 
   };
 }
 
@@ -239,30 +327,30 @@ async function deleteSite(id) {
  *  download variants (full / date-wise / customer-wise) — all three are
  *  just this same endpoint with different query params, so the export
  *  format decision stays on the frontend. */
-async function getSiteBills(siteId, query) {
-  const site = await Site.findById(siteId);
-  if (!site) throw ApiError.notFound('Site not found');
+// async function getSiteBills(siteId, query) {
+//   const site = await Site.findById(siteId);
+//   if (!site) throw ApiError.notFound('Site not found');
 
-  const filter = { site: siteId };
-  if (query.status && query.status !== 'ALL') filter.status = query.status;
-  if (query.customer) filter.customer = query.customer;
-  if (query.from || query.to) {
-    filter.createdAt = {};
-    if (query.from) filter.createdAt.$gte = new Date(query.from);
-    if (query.to) {
-      const to = new Date(query.to);
-      to.setHours(23, 59, 59, 999);
-      filter.createdAt.$lte = to;
-    }
-  }
+//   const filter = { site: siteId };
+//   if (query.status && query.status !== 'ALL') filter.status = query.status;
+//   if (query.customer) filter.customer = query.customer;
+//   if (query.from || query.to) {
+//     filter.createdAt = {};
+//     if (query.from) filter.createdAt.$gte = new Date(query.from);
+//     if (query.to) {
+//       const to = new Date(query.to);
+//       to.setHours(23, 59, 59, 999);
+//       filter.createdAt.$lte = to;
+//     }
+//   }
 
-  const { page, limit, skip } = getPagination(query, { page: 1, limit: 10 }); // ← was 500
-  const [items, total] = await Promise.all([
-    Bill.find(filter).sort('-createdAt').skip(skip).limit(limit),
-    Bill.countDocuments(filter),
-  ]);
-  return { items, meta: buildMeta({ page, limit, total }), site };
-}
+//   const { page, limit, skip } = getPagination(query, { page: 1, limit: 10 }); // ← was 500
+//   const [items, total] = await Promise.all([
+//     Bill.find(filter).sort('-createdAt').skip(skip).limit(limit),
+//     Bill.countDocuments(filter),
+//   ]);
+//   return { items, meta: buildMeta({ page, limit, total }), site };
+// }
 
 /** Sites a given customer has ever had a bill at, each with that customer's
  *  own pending amount at that site — used on the Customers page/history. */

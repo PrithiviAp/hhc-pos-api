@@ -432,8 +432,9 @@ const discountPerBill = discountApplied > 0
     else if (discountNow > 0) {
       // Discount-only path — items stay as-is. Live/OPEN bills are left
       // untouched so they recompute fresh tomorrow (that's the point).
-      if (!isLive) {
-        bill.discount = Math.round(((bill.discount || 0) + discountNow) * 100) / 100;
+   if (!isLive) {
+  bill.discount = Math.round(((bill.discount || 0) + discountNow) * 100) / 100;
+  bill.paymentWaivedAmount = Math.round(((bill.paymentWaivedAmount || 0) + discountNow) * 100) / 100; 
         bill.grandTotal = Math.max(Math.round((bill.grandTotal - discountNow) * 100) / 100, 0);
         bill.pendingAmount = Math.max(Math.round((owed - paidNow - discountNow) * 100) / 100, 0);
         bill.paymentStatus = bill.pendingAmount === 0 ? 'PAID' : 'PARTIAL';

@@ -77,6 +77,7 @@ const billSchema = new mongoose.Schema(
 
     subTotal: { type: Number, required: true },
     discount: { type: Number, default: 0 },
+    paymentWaivedAmount: { type: Number, default: 0 }, 
     grandTotal: { type: Number, required: true },
 
     amountPaid: { type: Number, default: 0, min: 0 },

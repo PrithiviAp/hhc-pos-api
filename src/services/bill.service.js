@@ -468,7 +468,7 @@ async function recordReturn(id, {
         }
 
         if (refundGivenNow > 0) {
-          pushPaymentEvent(bill, { type: 'REFUND', amount: refundGivenNow, performedBy, note: 'Refund on early return' });
+        pushPaymentEvent(bill, { type: 'REFUND', amount: refundGivenNow, method: paymentMethod, performedBy, note: 'Refund on early return' });
           if (bill.customer) {
             await Customer.findByIdAndUpdate(bill.customer, { $inc: { totalPurchases: -refundGivenNow } }, { session });
           }
@@ -529,11 +529,12 @@ async function recordPayment(id, amount, paymentMethod, waiveRemaining, performe
     bill.amountPaid = projectedPaid;
     let rawPending = liveGrandTotal - bill.amountPaid;
 
-    if (rawPending > 0 && waiveRemaining) {
-      bill.discount = Math.round((bill.discount + rawPending) * 100) / 100;
-      rawPending = 0;
-      remainingWaived = true;
-    }
+if (rawPending > 0 && waiveRemaining) {
+  bill.paymentWaivedAmount = Math.round(((bill.paymentWaivedAmount || 0) + rawPending) * 100) / 100;  // add
+  bill.discount = Math.round((bill.discount + rawPending) * 100) / 100;
+  rawPending = 0;
+  remainingWaived = true;
+}
 
     bill.pendingAmount = Math.max(rawPending, 0);
     bill.paymentStatus = remainingWaived ? 'PAID' : derivePaymentStatus(bill.amountPaid, liveGrandTotal);
@@ -549,12 +550,14 @@ async function recordPayment(id, amount, paymentMethod, waiveRemaining, performe
     bill.amountPaid = projectedPaid;
     let rawPending = bill.grandTotal - bill.amountPaid;
 
-    if (rawPending > 0 && waiveRemaining) {
-      bill.discount = Math.round((bill.discount + rawPending) * 100) / 100;
-      bill.grandTotal = Math.max(bill.subTotal - bill.discount, 0);
-      rawPending = bill.grandTotal - bill.amountPaid; // ~0
-      remainingWaived = true;
-    }
+// normal branch
+if (rawPending > 0 && waiveRemaining) {
+  bill.paymentWaivedAmount = Math.round(((bill.paymentWaivedAmount || 0) + rawPending) * 100) / 100;  // add
+  bill.discount = Math.round((bill.discount + rawPending) * 100) / 100;
+  bill.grandTotal = Math.max(bill.subTotal - bill.discount, 0);
+  rawPending = bill.grandTotal - bill.amountPaid;
+  remainingWaived = true;
+}
 
     bill.pendingAmount = Math.max(rawPending, 0);
     bill.paymentStatus = remainingWaived ? 'PAID' : derivePaymentStatus(bill.amountPaid, bill.grandTotal);
