@@ -3,16 +3,6 @@ const Bill = require('../models/Bill');
 const ApiError = require('../utils/ApiError');
 const { getPagination, buildMeta } = require('../utils/pagination.util');
 const { computeLiveTotals } = require('./bill.service');
-/** Finds an existing site by (case-insensitive) address, or creates one.
- *  This is the single place site identity is decided, used both by the
- *  Site API itself and by bill.service when a bill only carries a free-text
- *  siteAddress. Since address is globally unique, this never depends on
- *  which customer is asking. */
-
-// function isBillAccruing(bill) {
-//   if (bill.returnDateUnknown) return true;
-//   return bill.items.some((i) => i.billingMode === 'OPEN' && (i.quantity - i.quantityReturned) > 0);
-// }
 
 function isBillAccruing(bill) {
   if (bill.status === 'RETURNED' || bill.status === 'CANCELLED') return false;
@@ -92,8 +82,8 @@ const r2 = (n) => Math.round(n * 100) / 100;
 // }
 
 async function aggregateStatsForSites(siteIds) {
-  const bills = await Bill.find({ site: { $in: siteIds }, status: { $ne: 'CANCELLED' } });
-  const bySite = new Map();
+const bills = await Bill.find({ site: { $in: siteIds }, status: { $ne: 'CANCELLED' }, isDeleted: { $ne: true } });
+const bySite = new Map();
 
   for (const bill of bills) {
     const siteKey = String(bill.site);
@@ -161,7 +151,7 @@ async function getSiteBills(siteId, query) {
   const site = await Site.findById(siteId);
   if (!site) throw ApiError.notFound('Site not found');
 
-  const filter = { site: siteId };
+ const filter = { site: siteId, isDeleted: { $ne: true } };
   if (query.status && query.status !== 'ALL') filter.status = query.status;
   if (query.customer) filter.customer = query.customer;
   if (query.from || query.to) {
@@ -203,43 +193,7 @@ async function createSite({ name, address, createdBy }) {
   return Site.create({ name, address, createdBy });
 }
 
-/** Per-site aggregate stats: total billed, total pending, and a customer-wise
- *  breakdown (each customer who has ever had a bill at this site, with their
- *  own pending amount and bill count). Cancelled bills are excluded from the
- *  money totals but bills of every other status count. */
-// async function aggregateStatsForSites(siteIds) {
-//   const rows = await Bill.aggregate([
-//     { $match: { site: { $in: siteIds }, status: { $ne: 'CANCELLED' } } },
-//     {
-//       $group: {
-//         _id: { site: '$site', customer: '$customer', customerName: '$customerName', customerPhone: '$customerPhone' },
-//         billAmount: { $sum: '$grandTotal' },
-//         pendingAmount: { $sum: '$pendingAmount' },
-//         billCount: { $sum: 1 },
-//       },
-//     },
-//   ]);
 
-//   const bySite = new Map();
-//   for (const row of rows) {
-//     const siteKey = String(row._id.site);
-//     if (!bySite.has(siteKey)) {
-//       bySite.set(siteKey, { totalBillAmount: 0, totalPendingAmount: 0, customers: [] });
-//     }
-//     const entry = bySite.get(siteKey);
-//     entry.totalBillAmount += row.billAmount;
-//     entry.totalPendingAmount += row.pendingAmount;
-//     entry.customers.push({
-//       customerId: row._id.customer,
-//       customerName: row._id.customerName,
-//       customerPhone: row._id.customerPhone,
-//       billAmount: Math.round(row.billAmount * 100) / 100,
-//       pendingAmount: Math.round(row.pendingAmount * 100) / 100,
-//       billCount: row.billCount,
-//     });
-//   }
-//   return bySite;
-// }
 
 async function listSites(query) {
   const { page, limit, skip } = getPagination(query, { page: 1, limit: 10 });
@@ -323,40 +277,10 @@ async function deleteSite(id) {
   return site;
 }
 
-/** Bills for one site, for the "view details" drilldown and the three
- *  download variants (full / date-wise / customer-wise) — all three are
- *  just this same endpoint with different query params, so the export
- *  format decision stays on the frontend. */
-// async function getSiteBills(siteId, query) {
-//   const site = await Site.findById(siteId);
-//   if (!site) throw ApiError.notFound('Site not found');
 
-//   const filter = { site: siteId };
-//   if (query.status && query.status !== 'ALL') filter.status = query.status;
-//   if (query.customer) filter.customer = query.customer;
-//   if (query.from || query.to) {
-//     filter.createdAt = {};
-//     if (query.from) filter.createdAt.$gte = new Date(query.from);
-//     if (query.to) {
-//       const to = new Date(query.to);
-//       to.setHours(23, 59, 59, 999);
-//       filter.createdAt.$lte = to;
-//     }
-//   }
-
-//   const { page, limit, skip } = getPagination(query, { page: 1, limit: 10 }); // ← was 500
-//   const [items, total] = await Promise.all([
-//     Bill.find(filter).sort('-createdAt').skip(skip).limit(limit),
-//     Bill.countDocuments(filter),
-//   ]);
-//   return { items, meta: buildMeta({ page, limit, total }), site };
-// }
-
-/** Sites a given customer has ever had a bill at, each with that customer's
- *  own pending amount at that site — used on the Customers page/history. */
 async function listSitesForCustomer(customerId) {
   const rows = await Bill.aggregate([
-    { $match: { customer: customerId, status: { $ne: 'CANCELLED' }, site: { $ne: null } } },
+   { $match: { customer: customerId, status: { $ne: 'CANCELLED' }, site: { $ne: null }, isDeleted: { $ne: true } } },
     {
       $group: {
         _id: '$site',
@@ -385,7 +309,7 @@ async function getSiteBillsForExport(siteId, query) {
   const site = await Site.findById(siteId);
   if (!site) throw ApiError.notFound('Site not found');
 
-  const filter = { site: siteId };
+ const filter = { site: siteId, isDeleted: { $ne: true } };
   if (query.status && query.status !== 'ALL') filter.status = query.status;
   if (query.customer) filter.customer = query.customer;
   if (query.from || query.to) {

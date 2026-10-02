@@ -264,6 +264,7 @@ if (Number.isNaN(borrowedAt.getTime())) throw ApiError.badRequest('Invalid borro
 async function listBills(query) {
   const { page, limit, skip } = getPagination(query);
   const filter = {};
+  filter.isDeleted = { $ne: true };
   if (query.search) {
     filter.$or = [
       { billNumber: new RegExp(query.search, 'i') },
@@ -314,11 +315,24 @@ async function listBills(query) {
 }
 
 async function getBill(id) {
-  const bill = await Bill.findById(id)
+  const bill = await Bill.findOne({ _id: id, isDeleted: { $ne: true } })
     .populate('createdBy', 'name username')
     .populate('site', 'name address contactPhone');
   if (!bill) throw ApiError.notFound('Bill not found');
   return { ...bill.toObject(), ...computeLiveTotals(bill) };
+}
+
+async function deleteBill(id, performedBy) {
+  const bill = await Bill.findOne({ _id: id, isDeleted: { $ne: true } });
+  if (!bill) throw ApiError.notFound('Bill not found');
+  if (bill.status !== 'CANCELLED') {
+    throw ApiError.badRequest('Only cancelled bills can be deleted');
+  }
+  bill.isDeleted = true;
+  bill.deletedAt = new Date();
+  bill.deletedBy = performedBy;
+  await bill.save();
+  return bill;
 }
 
 async function cancelBill(id) {
@@ -723,5 +737,5 @@ async function getStockMatrix() {
 module.exports = {
   createBill, listBills, getBill, cancelBill, recordReturn, recordPayment, isBillOverdue,
   computeLiveTotals, getBillAlertBuckets, acknowledgeBillAlert, updateAlertDueDate,
-  getStockMatrix,
+  getStockMatrix,deleteBill
 };

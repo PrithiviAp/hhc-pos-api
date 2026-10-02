@@ -52,7 +52,7 @@ async function list(query) {
   // Live/open-ended totals need day-based math per bill, not a pure Mongo
   // aggregation — same reason bill.service.js#listBills falls back to a
   // JS-side pass for pendingOnly/overdueOnly.
-  const bills = await Bill.find({ customer: { $in: customerIds }, status: { $ne: 'CANCELLED' } });
+  const bills = await Bill.find({ customer: { $in: customerIds }, status: { $ne: 'CANCELLED' }, isDeleted: { $ne: true } });
 
 const statsMap = new Map();
 for (const bill of bills) {
@@ -102,7 +102,7 @@ async function getHistory(id) {
   const customer = await Customer.findById(id);
   if (!customer) throw ApiError.notFound('Customer not found');
 
-  const bills = await Bill.find({ customer: id, status: { $ne: 'CANCELLED' } })
+  const bills = await Bill.find({ customer: id, status: { $ne: 'CANCELLED' }, isDeleted: { $ne: true } })
     .populate('site', 'name address')
     .sort('-createdAt');
 
@@ -215,7 +215,7 @@ async function payPending(id, amount, paymentMethod = 'CASH', refundGivenNow, wa
   const customer = await Customer.findById(id);
   if (!customer) throw ApiError.notFound('Customer not found');
 
-  const bills = await Bill.find({ customer: id, status: { $ne: 'CANCELLED' } }).sort('createdAt');
+  const bills = await Bill.find({ customer: id, status: { $ne: 'CANCELLED' }, isDeleted: { $ne: true } }).sort('createdAt');
   const owedList = buildOwedList(bills);
 
   const totalPending = Math.round(owedList.reduce((sum, o) => sum + o.owed, 0) * 100) / 100;

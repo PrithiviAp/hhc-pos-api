@@ -61,5 +61,10 @@ const matrix = asyncHandler(async (req, res) => {
   new ApiResponse(200, data, 'Stock matrix fetched').send(res);
 });
 
+const remove = asyncHandler(async (req, res) => {
+  const bill = await service.deleteBill(req.params.id, req.user._id);
+  new ApiResponse(200, bill, 'Bill deleted').send(res);
+});
 
-module.exports = { list, getOne, create, cancel, returnItems, pay, alerts, acknowledgeAlert, updateAlertDate,matrix };
+
+module.exports = { list, getOne, create, cancel, returnItems, pay, alerts, acknowledgeAlert, updateAlertDate,matrix,remove };

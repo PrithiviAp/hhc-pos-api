@@ -93,6 +93,9 @@ const billSchema = new mongoose.Schema(
 
     status: { type: String, enum: ['BORROWED', 'PARTIALLY_RETURNED', 'RETURNED', 'CANCELLED'], default: 'BORROWED' },
     returnedAt: { type: Date },
+    isDeleted: { type: Boolean, default: false, index: true },
+deletedAt: { type: Date },
+deletedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
 
     returnHistory: { type: [billReturnEventSchema], default: [] },
     paymentHistory: { type: [billPaymentEventSchema], default: [] },

@@ -7,6 +7,7 @@ router.use(authenticate);
 
 router.get('/alerts/summary', authorize('admin'), controller.alerts);
 router.get('/matrix', controller.matrix); 
+router.delete('/:id', authorize('admin', 'manager'), controller.remove);
 router.patch('/:id/alerts/ack', authorize('admin'), controller.acknowledgeAlert);
 router.patch('/:id/alerts/date', authorize('admin'), controller.updateAlertDate); // ← new
 router.get('/', controller.list);
